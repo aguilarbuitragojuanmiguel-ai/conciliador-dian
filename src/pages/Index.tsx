@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner";
 
 const STORAGE_KEY = "columnas_conta";
+const STORAGE_HEADERS_KEY = "columnas_conta_headers";
 
 const detectarColumnas = (headers: string[]): ContaColumnMap => {
   const h = headers.map((x) => String(x).toLowerCase().trim());
@@ -26,21 +27,20 @@ const detectarColumnas = (headers: string[]): ContaColumnMap => {
     return idx !== undefined && idx >= 0 ? headers[idx] : null;
   };
   return {
-    nit: find(["identificación","identificacion","nit","ruc","documento","id","cedula","número de identificación","nit tercero"]),
-    nombre: find(["proveedor","nombre","razón social","razon social","name","tercero","beneficiario","nombre tercero"]),
-    valor: find(["valor","total","importe","monto","debito","debe","value","amount","vr","débito","débito pcga","debito pcga"]),
-    factura: find(["factura proveedor","factura","documento","comprobante","número","numero","referencia","number","consecutivo"]),
+    nit: find(["identificación","identificacion","nit","ruc","cedula","número de identificación","nit tercero"]),
+    nombre: find(["proveedor","nombre","razón social","razon social","tercero","beneficiario","nombre tercero"]),
+    valor: find(["valor","total","importe","monto","débito","debito","debe","débito pcga","debito pcga","vr"]),
+    factura: find(["factura proveedor","factura","comprobante","referencia","consecutivo"]),
     cufe: find(["cufe","código único","codigo unico","cufe/cude","cude","uuid"]),
     estado: find(["estado","status","situacion","situación"]),
-    descripcion: find(["descripcion","descripción","concepto","description","cuenta contable"]),
-    detalle: find(["detalle","observacion","observación","nota","notas","observaciones","detail","descripcion detalle"]),
+    descripcion: find(["descripcion","descripción","concepto","cuenta contable"]),
+    detalle: find(["detalle","observacion","observación","nota","notas","observaciones","descripcion detalle"]),
   };
 };
 
 const MONTHS = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 type FilterKey = "Todos" | ReconciliationStatus;
 const FILTERS: FilterKey[] = ["Todos","Correcto","Diferencia Menor","Revisar","Solo DIAN","Solo Contabilidad"];
-
 const TASAS_IVA = [0.19, 0.05, 0.16, 0.08, 0.04, 0.02, 0.01];
 
 const Index = () => {
@@ -55,7 +55,9 @@ const Index = () => {
   const [filter, setFilter] = useState<FilterKey>("Todos");
   const [mapperOpen, setMapperOpen] = useState(false);
   const [mapperHeaders, setMapperHeaders] = useState<string[]>([]);
-  const [mapperInitial, setMapperInitial] = useState<ContaColumnMap>({ nit:null,nombre:null,valor:null,factura:null,cufe:null,estado:null,descripcion:null,detalle:null });
+  const [mapperInitial, setMapperInitial] = useState<ContaColumnMap>({
+    nit:null, nombre:null, valor:null, factura:null, cufe:null, estado:null, descripcion:null, detalle:null,
+  });
   const [pendingData, setPendingData] = useState<{ dianRows: any[]; contaRows: any[] } | null>(null);
   const [companies, setCompanies] = useState<Company[]>(() => loadCompanies());
   const [activeNit, setActiveNitState] = useState<string | null>(() => getActiveNit());
@@ -88,7 +90,10 @@ const Index = () => {
   }, [result, filter]);
 
   const counts = useMemo(() => {
-    const map: Record<FilterKey, number> = { Todos: result?.items.length ?? 0, Correcto:0, "Diferencia Menor":0, Revisar:0, "Solo DIAN":0, "Solo Contabilidad":0 };
+    const map: Record<FilterKey, number> = {
+      Todos: result?.items.length ?? 0, Correcto:0, "Diferencia Menor":0,
+      Revisar:0, "Solo DIAN":0, "Solo Contabilidad":0,
+    };
     result?.items.forEach((i) => (map[i.estado] += 1));
     return map;
   }, [result]);
@@ -192,9 +197,8 @@ const Index = () => {
 
     // ── CONTABILIDAD ──
     const contaMap: Record<string, { nit:string; nombre:string; total:number; facturas:FacturaDetalle[] }> = {};
-
-    // Paso 1: agrupar por clave + factura
     const facturaMap: Record<string, { clave:string; nit:string; nombre:string; factura:string; cufe:string; descripcion:string; detalle:string; total:number }> = {};
+
     for (const c of contaRows) {
       const est = colMap.estado ? String(c[colMap.estado] ?? "").toLowerCase() : "";
       if (est.includes("anulado") || est.includes("elaboraci")) continue;
@@ -209,7 +213,6 @@ const Index = () => {
       const clave = claveContabilidad(nit, nombre);
       if (!clave) continue;
 
-      // Clave única: con factura → agrupa; sin factura → individual
       const esIVA = detectarTasaIVA(descripcion, detalle) !== null;
       const claveFactura = factura
         ? `${clave}__${factura}`
@@ -228,7 +231,7 @@ const Index = () => {
       facturaMap[claveFactura].total += valor;
     }
 
-    // Paso 2: separar normales e IVA
+    // Separar normales e IVA
     const entradasNormales: typeof facturaMap[string][] = [];
     const entradasIVA: (typeof facturaMap[string] & { tasa: number })[] = [];
     for (const item of Object.values(facturaMap)) {
@@ -237,7 +240,7 @@ const Index = () => {
       else entradasNormales.push(item);
     }
 
-    // Paso 3: construir contaMap con normales
+    // Construir contaMap con normales
     for (const item of entradasNormales) {
       const { clave, nit, nombre, factura, cufe, total, descripcion } = item;
       if (!contaMap[clave]) contaMap[clave] = { nit, nombre, total: 0, facturas: [] };
@@ -248,7 +251,7 @@ const Index = () => {
       else contaMap[clave].facturas.push({ folio, cufe, valor: total });
     }
 
-    // Paso 4: unir IVA a su base
+    // Unir IVA a su base
     for (const iva of entradasIVA) {
       const { clave, tasa, total: valorIVA, nit, nombre, detalle } = iva;
       if (!contaMap[clave]) {
@@ -262,7 +265,6 @@ const Index = () => {
         if (!contaMap[clave].facturas[idx].folio.includes("(+ IVA)"))
           contaMap[clave].facturas[idx].folio += " (+ IVA)";
       }
-      // Si no encontró base: suma al total sin mostrar fila
     }
 
     // ── CRUCE ──
@@ -286,7 +288,6 @@ const Index = () => {
     const contaUsados = new Set<string>();
     const items: ReconciliationItem[] = [];
 
-    // Exacto
     for (const clave of Object.keys(dianMap)) {
       if (contaMap[clave]) {
         contaUsados.add(clave);
@@ -296,7 +297,6 @@ const Index = () => {
       }
     }
 
-    // Similitud
     for (const clave of Object.keys(dianMap)) {
       if (contaMap[clave]) continue;
       const d = dianMap[clave];
@@ -310,7 +310,6 @@ const Index = () => {
       }
     }
 
-    // Solo contabilidad
     for (const clave of Object.keys(contaMap)) {
       if (contaUsados.has(clave)) continue;
       const c = contaMap[clave];
@@ -349,17 +348,35 @@ const Index = () => {
       const contaRows = await readXLSXRows(contaFile);
       const headers = contaRows.length > 0 ? Object.keys(contaRows[0]) : [];
 
+      // Cargar mapeo y headers guardados
       let saved: ContaColumnMap | null = null;
-      try { const raw = localStorage.getItem(STORAGE_KEY); if (raw) saved = JSON.parse(raw); } catch {}
+      let savedHeaders: string[] = [];
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) saved = JSON.parse(raw);
+        const rawH = localStorage.getItem(STORAGE_HEADERS_KEY);
+        if (rawH) savedHeaders = JSON.parse(rawH);
+      } catch {}
 
-      const validSaved = saved && (!saved.nit || headers.includes(saved.nit)) && saved.nombre && headers.includes(saved.nombre) && saved.valor && headers.includes(saved.valor) && (!saved.factura || headers.includes(saved.factura));
-      const colMap: ContaColumnMap = validSaved ? saved! : detectarColumnas(headers);
+      // El mapeo solo es válido si el archivo tiene EXACTAMENTE las mismas columnas que la vez anterior
+      const mismosHeaders = savedHeaders.length > 0 &&
+        savedHeaders.length === headers.length &&
+        savedHeaders.every((h) => headers.includes(h));
 
-      if (!colMap.nombre || !colMap.valor) {
-        setMapperHeaders(headers); setMapperInitial(colMap);
-        setPendingData({ dianRows, contaRows }); setMapperOpen(true); setLoading(false); return;
+      if (mismosHeaders && saved && saved.nombre && saved.valor) {
+        // Mismo tipo de archivo — usar mapeo guardado directamente sin preguntar
+        finishProcessing(dianRows, contaRows, saved);
+        return;
       }
-      finishProcessing(dianRows, contaRows, colMap);
+
+      // Archivo diferente o primera vez — detectar automáticamente y mostrar mapper para confirmar
+      const colMap = detectarColumnas(headers);
+      setMapperHeaders(headers);
+      setMapperInitial(colMap);
+      setPendingData({ dianRows, contaRows });
+      setMapperOpen(true);
+      setLoading(false);
+
     } catch (e: any) {
       const msg = e?.message ?? "Error al procesar"; setError(msg); toast.error(msg); setLoading(false);
     }
@@ -367,8 +384,19 @@ const Index = () => {
 
   const handleMapperConfirm = (colMap: ContaColumnMap) => {
     setMapperOpen(false);
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(colMap)); } catch {}
-    if (pendingData) { setLoading(true); finishProcessing(pendingData.dianRows, pendingData.contaRows, colMap); setPendingData(null); }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(colMap));
+      // Guardar también los headers para detectar cambios de software la próxima vez
+      if (pendingData) {
+        const headers = pendingData.contaRows.length > 0 ? Object.keys(pendingData.contaRows[0]) : [];
+        localStorage.setItem(STORAGE_HEADERS_KEY, JSON.stringify(headers));
+      }
+    } catch {}
+    if (pendingData) {
+      setLoading(true);
+      finishProcessing(pendingData.dianRows, pendingData.contaRows, colMap);
+      setPendingData(null);
+    }
   };
 
   const handleExport = () => {
@@ -381,7 +409,7 @@ const Index = () => {
     const activeCompany = companies.find((co) => co.nit === activeNit);
 
     const resAOA: any[][] = [
-      ["CONCILIACIÓN DIAN VS CONTABILIDAD"],[], 
+      ["CONCILIACIÓN DIAN VS CONTABILIDAD"],[],
       ["Empresa", activeCompany?.nombre ?? "—"],
       ["NIT", activeNit ?? "—"],
       ["Período", `${MONTHS[month]} ${year}`],
@@ -479,9 +507,7 @@ const Index = () => {
 
   return (
     <div className="flex min-h-screen w-full bg-background font-sans">
-      {/* SIDEBAR */}
       <aside className="w-[300px] shrink-0 border-r border-border bg-card flex flex-col sticky top-0 h-screen shadow-sm">
-        {/* Header */}
         <div className="px-6 py-5 border-b border-border">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
@@ -495,7 +521,6 @@ const Index = () => {
         </div>
 
         <div className="p-5 flex flex-col gap-5 flex-1 overflow-y-auto scrollbar-thin">
-          {/* Período */}
           <div className="flex flex-col gap-2">
             <label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Período</label>
             <div className="grid grid-cols-2 gap-2">
@@ -510,7 +535,6 @@ const Index = () => {
             </div>
           </div>
 
-          {/* Archivos */}
           <FileDropZone label="Reporte DIAN (.xlsx)" icon="cloud" file={dianFile} onFileChange={setDianFile} />
           <FileDropZone label="Contabilidad (.xlsx)" icon="database" file={contaFile} onFileChange={setContaFile} />
 
@@ -521,7 +545,6 @@ const Index = () => {
             </div>
           )}
 
-          {/* Stats rápidos si hay resultado */}
           {result && (
             <div className="rounded-lg border border-border bg-surface p-3 space-y-2">
               <div className="flex items-center justify-between">
@@ -536,7 +559,7 @@ const Index = () => {
           )}
         </div>
 
-        <div className="p-5 border-t border-border space-y-2">
+        <div className="p-5 border-t border-border">
           <button onClick={handleProcess} disabled={loading}
             className="w-full rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 active:scale-[0.98] transition-all disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2">
             {loading ? <><Loader2 className="h-4 w-4 animate-spin" />Procesando...</> : <><CheckCircle2 className="h-4 w-4" />Procesar conciliación</>}
@@ -544,9 +567,7 @@ const Index = () => {
         </div>
       </aside>
 
-      {/* MAIN */}
       <main className="flex-1 flex flex-col bg-background min-w-0">
-        {/* Header */}
         <header className="h-14 flex items-center justify-between px-8 border-b border-border bg-card gap-4 sticky top-0 z-10 shadow-sm">
           <div className="flex items-center gap-3">
             <h2 className="text-sm font-bold text-foreground">Dashboard de resultados</h2>
@@ -582,13 +603,13 @@ const Index = () => {
               </div>
               <h3 className="text-lg font-bold text-foreground mb-2">Sin resultados todavía</h3>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                Carga el reporte DIAN y el archivo de contabilidad, selecciona la empresa y el período, luego presiona <span className="font-semibold text-foreground">Procesar conciliación</span>.
+                Carga el reporte DIAN y el archivo de contabilidad, selecciona la empresa y el período, luego presiona{" "}
+                <span className="font-semibold text-foreground">Procesar conciliación</span>.
               </p>
             </div>
           </div>
         ) : (
           <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-5 scrollbar-thin">
-            {/* Métricas */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
               {[
                 { label:"Total DIAN", value:formatCurrency(result.totalDian), color:"bg-status-dian", textColor:"text-status-dian" },
@@ -604,10 +625,8 @@ const Index = () => {
               ))}
             </div>
 
-            {/* Donut */}
             <StatusDonut items={result.items} />
 
-            {/* Filtros */}
             <div className="flex flex-wrap gap-2">
               {FILTERS.map((f) => {
                 const active = filter === f;
@@ -626,13 +645,18 @@ const Index = () => {
               })}
             </div>
 
-            {/* Tabla */}
             <ReconciliationTable items={filteredItems} />
           </div>
         )}
       </main>
 
-      <ColumnMapperModal open={mapperOpen} headers={mapperHeaders} initial={mapperInitial} onConfirm={handleMapperConfirm} onCancel={() => { setMapperOpen(false); setPendingData(null); setLoading(false); }} />
+      <ColumnMapperModal
+        open={mapperOpen}
+        headers={mapperHeaders}
+        initial={mapperInitial}
+        onConfirm={handleMapperConfirm}
+        onCancel={() => { setMapperOpen(false); setPendingData(null); setLoading(false); }}
+      />
     </div>
   );
 };
