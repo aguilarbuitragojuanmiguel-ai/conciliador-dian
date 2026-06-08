@@ -38,6 +38,22 @@ const detectarColumnas = (headers: string[]): ContaColumnMap => {
   };
 };
 
+// ─── Detectar si el archivo es de SIESA ─────────────────────────────────────
+const esSIESA = (headers: string[]): boolean => {
+  const h = headers.map((x) => String(x).toLowerCase().trim());
+  return h.includes("notas") && h.includes("razon social") && h.includes("debito pcga") && h.includes("documento");
+};
+
+// ─── Extraer folio desde columna Notas de SIESA ─────────────────────────────
+const extraerFolioDeNotas = (nota: string): string | null => {
+  if (!nota || nota.toLowerCase() === "none" || nota.trim() === "") return null;
+  const primera = nota.trim().split(/\s+/)[0];
+  // Extraer dígitos al final de la primera palabra (ej: FEVT1109 → 1109, MFE-58632 → 58632)
+  const match = primera.replace(/-/g, "").match(/(\d+)$/);
+  if (match) return match[1];
+  return null;
+};
+
 const MONTHS = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 type FilterKey = "Todos" | ReconciliationStatus;
 const FILTERS: FilterKey[] = ["Todos","Correcto","Diferencia Menor","Revisar","Solo DIAN","Solo Contabilidad"];
@@ -174,16 +190,21 @@ const Index = () => {
   const buildResult = (dianRows: any[], contaRows: any[], colMap: ContaColumnMap): ReconciliationResult => {
     // ── DIAN ──
     const dianMap: Record<string, { nit:string; nombre:string; total:number; facturas:FacturaDetalle[]; cufes:string[] }> = {};
+    // Mapa adicional: folio → nit (para cruce SIESA por folio)
+    const folioANit: Record<string, string> = {};
+
     for (const d of dianRows) {
       const nit = String(d["NIT Emisor"] ?? "").replace(/\D/g,"").trim();
       if (!nit) continue;
       if (!dianMap[nit]) dianMap[nit] = { nit, nombre: String(d["Nombre Emisor"] ?? ""), total:0, facturas:[], cufes:[] };
       const valor = parseVal(d["Total"]);
       dianMap[nit].total += valor;
-      const folio = d["Folio"] ? String(d["Folio"]) : "";
+      const folio = d["Folio"] ? String(d["Folio"]).trim() : "";
       const cufe = d["CUFE"] ? String(d["CUFE"]) : (d["cufe"] ? String(d["cufe"]) : "");
       dianMap[nit].facturas.push({ folio, cufe, valor });
       if (cufe) dianMap[nit].cufes.push(cufe);
+      // Registrar folio → nit para búsqueda SIESA
+      if (folio) folioANit[folio] = nit;
     }
 
     const limpiarNombre = (n: string) =>
@@ -196,20 +217,37 @@ const Index = () => {
     const claveContabilidad = (nit: string, nombre: string) => nit ? nit.replace(/\D/g,"").trim() : limpiarNombre(nombre);
 
     // ── CONTABILIDAD ──
+    const headers = contaRows.length > 0 ? Object.keys(contaRows[0]) : [];
+    const esSiesaFile = esSIESA(headers);
+
     const contaMap: Record<string, { nit:string; nombre:string; total:number; facturas:FacturaDetalle[] }> = {};
-    const facturaMap: Record<string, { clave:string; nit:string; nombre:string; factura:string; cufe:string; descripcion:string; detalle:string; total:number }> = {};
+    const facturaMap: Record<string, { clave:string; nit:string; nombre:string; factura:string; cufe:string; descripcion:string; detalle:string; total:number; folioNota:string }> = {};
 
     for (const c of contaRows) {
       const est = colMap.estado ? String(c[colMap.estado] ?? "").toLowerCase() : "";
       if (est.includes("anulado") || est.includes("elaboraci")) continue;
+
       const rawNit = colMap.nit ? c[colMap.nit] : "";
-      const nit = String(rawNit ?? "").replace(/\.0$/,"").replace(/\D/g,"").trim();
-      const nombre = colMap.nombre ? String(c[colMap.nombre] ?? "") : "";
+      let nit = String(rawNit ?? "").replace(/\.0$/,"").replace(/\D/g,"").trim();
+      const nombre = colMap.nombre ? String(c[colMap.nombre] ?? "").trim() : "";
       const factura = colMap.factura && c[colMap.factura] ? String(c[colMap.factura]).trim() : "";
       const cufe = colMap.cufe && c[colMap.cufe] ? String(c[colMap.cufe]) : "";
       const descripcion = colMap.descripcion ? String(c[colMap.descripcion] ?? "") : "";
       const detalle = colMap.detalle ? String(c[colMap.detalle] ?? "") : "";
       const valor = colMap.valor ? parseVal(c[colMap.valor]) : 0;
+
+      // ── SIESA: intentar resolver NIT desde folio en Notas ──
+      let folioNota = "";
+      if (esSiesaFile && !nit) {
+        const notasCol = headers.find(h => h.toLowerCase() === "notas");
+        const notaVal = notasCol ? String(c[notasCol] ?? "") : "";
+        folioNota = extraerFolioDeNotas(notaVal) ?? "";
+        // Si encontramos el folio en el mapa de DIAN → usar ese NIT
+        if (folioNota && folioANit[folioNota]) {
+          nit = folioANit[folioNota];
+        }
+      }
+
       const clave = claveContabilidad(nit, nombre);
       if (!clave) continue;
 
@@ -221,7 +259,7 @@ const Index = () => {
           : `${clave}__sinfolio__${Object.keys(facturaMap).length}`;
 
       if (!facturaMap[claveFactura]) {
-        facturaMap[claveFactura] = { clave, nit, nombre, factura, cufe, descripcion, detalle, total: 0 };
+        facturaMap[claveFactura] = { clave, nit, nombre, factura: factura || folioNota, cufe, descripcion, detalle, total: 0, folioNota };
       } else {
         if (descripcion && !facturaMap[claveFactura].descripcion.includes(descripcion))
           facturaMap[claveFactura].descripcion += " " + descripcion;
@@ -242,10 +280,10 @@ const Index = () => {
 
     // Construir contaMap con normales
     for (const item of entradasNormales) {
-      const { clave, nit, nombre, factura, cufe, total, descripcion } = item;
+      const { clave, nit, nombre, factura, folioNota, cufe, total, descripcion } = item;
       if (!contaMap[clave]) contaMap[clave] = { nit, nombre, total: 0, facturas: [] };
       contaMap[clave].total += total;
-      const folio = factura || (descripcion ? descripcion.substring(0, 40) : "") || "Sin número";
+      const folio = factura || folioNota || (descripcion ? descripcion.substring(0, 40) : "") || "Sin número";
       const existIdx = contaMap[clave].facturas.findIndex((f) => f.folio === folio);
       if (existIdx >= 0) contaMap[clave].facturas[existIdx].valor += total;
       else contaMap[clave].facturas.push({ folio, cufe, valor: total });
@@ -288,6 +326,7 @@ const Index = () => {
     const contaUsados = new Set<string>();
     const items: ReconciliationItem[] = [];
 
+    // Cruce exacto por NIT
     for (const clave of Object.keys(dianMap)) {
       if (contaMap[clave]) {
         contaUsados.add(clave);
@@ -297,6 +336,7 @@ const Index = () => {
       }
     }
 
+    // Cruce por similitud de nombre (incluye SIESA sin NIT que no cruzó por folio)
     for (const clave of Object.keys(dianMap)) {
       if (contaMap[clave]) continue;
       const d = dianMap[clave];
@@ -310,6 +350,7 @@ const Index = () => {
       }
     }
 
+    // Solo contabilidad
     for (const clave of Object.keys(contaMap)) {
       if (contaUsados.has(clave)) continue;
       const c = contaMap[clave];
@@ -348,7 +389,23 @@ const Index = () => {
       const contaRows = await readXLSXRows(contaFile);
       const headers = contaRows.length > 0 ? Object.keys(contaRows[0]) : [];
 
-      // Cargar mapeo y headers guardados
+      // SIESA se detecta automáticamente — no necesita mapeo manual
+      if (esSIESA(headers)) {
+        const colMap: ContaColumnMap = {
+          nit: null,
+          nombre: "Razon social",
+          valor: "Debito PCGA",
+          factura: null,
+          cufe: null,
+          estado: "Estado",
+          descripcion: null,
+          detalle: "Notas",
+        };
+        finishProcessing(dianRows, contaRows, colMap);
+        return;
+      }
+
+      // Cargar mapeo y headers guardados para otros softwares
       let saved: ContaColumnMap | null = null;
       let savedHeaders: string[] = [];
       try {
@@ -358,18 +415,16 @@ const Index = () => {
         if (rawH) savedHeaders = JSON.parse(rawH);
       } catch {}
 
-      // El mapeo solo es válido si el archivo tiene EXACTAMENTE las mismas columnas que la vez anterior
       const mismosHeaders = savedHeaders.length > 0 &&
         savedHeaders.length === headers.length &&
         savedHeaders.every((h) => headers.includes(h));
 
       if (mismosHeaders && saved && saved.nombre && saved.valor) {
-        // Mismo tipo de archivo — usar mapeo guardado directamente sin preguntar
         finishProcessing(dianRows, contaRows, saved);
         return;
       }
 
-      // Archivo diferente o primera vez — detectar automáticamente y mostrar mapper para confirmar
+      // Archivo desconocido — mostrar mapper
       const colMap = detectarColumnas(headers);
       setMapperHeaders(headers);
       setMapperInitial(colMap);
@@ -386,7 +441,6 @@ const Index = () => {
     setMapperOpen(false);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(colMap));
-      // Guardar también los headers para detectar cambios de software la próxima vez
       if (pendingData) {
         const headers = pendingData.contaRows.length > 0 ? Object.keys(pendingData.contaRows[0]) : [];
         localStorage.setItem(STORAGE_HEADERS_KEY, JSON.stringify(headers));
